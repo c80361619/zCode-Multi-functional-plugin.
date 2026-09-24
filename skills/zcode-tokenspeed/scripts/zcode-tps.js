@@ -307,6 +307,13 @@
     if (v < 1e9) return trim(v / 1e6) + "m";
     return trim(v / 1e9) + "b";
   };
+  // 平均命中率：固定两位小数（不足补零），四舍五入。
+  // 先放大取整再回缩，规避 toFixed 的二进制表示误差（如 (1.005).toFixed(2) === "1.00"）。
+  const fmtPct = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "0.00";
+    return (Math.round(n * 100 + 1e-9) / 100).toFixed(2);
+  };
   const fmtStamp = (ms) => {
     if (ms == null) return null;
     const d = new Date(ms), now = new Date();
@@ -647,8 +654,8 @@
           const nodes = [span("输入 "), span(fmtTok(agg.input), "VALUE")];
           if (agg.cache > 0) {
             nodes.push(span("命中 " + fmtTok(agg.cache), "VALUE"));
-            const pct = agg.input > 0 ? Math.round((agg.cache / agg.input) * 100) : 0;
-            if (pct > 0) nodes.push(span(" 平均命中 " + pct + "%", "ACCENT"));
+            const pct = agg.input > 0 ? (agg.cache / agg.input) * 100 : 0;
+            if (pct > 0) nodes.push(span(" 平均命中 " + fmtPct(pct) + "%", "ACCENT"));
           }
           segs.push({ p: 5, g: 1, nodes });
         }
