@@ -1,6 +1,6 @@
 ---
 name: zcode-tokenspeed
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①思考档位配置（3.14+ 原生 optionSpecs，无需内核补丁）②思考档位透传（≤3.11 内核补丁）③用量页去截断（趋势图/饼图全量）④模型弹窗加宽 ⑤TPS 状态栏（输入框统计条：本轮指标+会话累计）⑥思考强度吸附滑条 ⑦增强提示词按钮（一键润色输入框草稿）⑧设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①思考档位配置（3.14+ 原生 optionSpecs，无需内核补丁）②思考档位透传（≤3.11 内核补丁）③用量页去截断（趋势图/饼图全量）④模型弹窗加宽 ⑤TPS 状态栏（输入框统计条：本轮指标+会话累计）⑥思考强度吸附滑条 ⑦增强提示词按钮（一键润色输入框草稿，右键可选润色所用模型）⑧设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
@@ -57,7 +57,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 | ④ TPS 状态栏 | 需要 | 需要 |
 | ⑤ 模型拉取按钮 | 需要 | 需要，模板已按 `optionSpecs` 新格式写入 |
 | ⑥ 思考强度滑条 | 需要 | 需要 |
-| ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用当前选中的模型调一次补全；提示词模板内置。0.5.9 起解析只选**真正可用**的供应商，并对失败做归因与分类重试（见第七节） |
+| ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用**选定**的模型调一次补全；提示词模板内置。0.5.9 起解析只选**真正可用**的供应商，并对失败做归因与分类重试；0.6.7 起支持**右键选模型**（菜单按供应商分组、选中即持久化、零重启生效，见第七节） |
 
 > **升级会整体覆盖 app.asar**：除 ①（配置侧，写 `provider_config.json`）外，②–⑦ 升级后都需重跑。
 > 其中**重打包级**（④ TPS 状态栏 / ⑤ 模型拉取按钮 / ⑥ 思考强度滑条 / ⑦ 增强提示词）重跑时会按内容比对
@@ -235,7 +235,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出拖动条面板（dsh-reasoning-effort 同款：胶囊轨道 + canvas 像素辐射 + 白色旋钮，连续跟手、松手吸附）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
-| **增强提示词** | 输入框旁一键用当前选中模型润色草稿（可恢复原文） | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
+| **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
 两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --thought-slider --model-puller`。
@@ -741,7 +741,7 @@ python zcode_patcher.py --thought-slider --slider-src /path/to/zcode-thought-sli
 - `__zsliderCtl.state().thinking` 用于确认生成中判定（新版本改了 i18n 或按钮结构就要补 `THINK_SELECTORS`）；该字段不影响拖动条样式。
 - 入口不出现：先看探针——`document.querySelector('[data-thought][data-thought-levels]')` 是否有值；当前模型未配思考档位时不显示属预期。
 
-## 七、增强提示词：「润色」按钮与跨机「Model is unavailable」
+## 七、增强提示词：「润色」按钮、右键选模型与跨机「Model is unavailable」
 
 输入框工具栏一键润色草稿（图标 3 态：✦ 待机 / ◌ 增强中 / ↺ 可还原 20s）。
 
@@ -751,8 +751,13 @@ python zcode_patcher.py --enhance-prompt --check
 python zcode_patcher.py --enhance-prompt --revert
 ```
 
-链路：渲染层按钮 → preload 桥 `window.zcode.enhancePrompt(text, modelValue, modelLabel)`
+**左键**润色；**右键**弹出模型选择菜单（按供应商分组列出所有可用模型，选中即持久化，
+之后每次润色都用它，零重启生效）—— 见下文「右键菜单」一节。
+
+链路：渲染层按钮 → preload 桥 `window.zcode.enhancePrompt(text, modelValue, modelLabel, override)`
 → main handler `zcode:enhance-prompt`（`_ENHANCE_HANDLER`）读**供应商配置**解析 → 直接 POST 补全接口。
+菜单另走两条桥：`listEnhanceModels()`（复用同一通道的 `{list:true}` 分支取清单）与
+`saveEnhanceModel({providerId, modelId})` → main handler `zcode:enhance-model-save`（写配置文件）。
 
 ### ★★ 关键前提：客户端发请求用的是 `provider_config.json`，不是 `config.json`（0.5.10 修复）
 
@@ -777,7 +782,7 @@ python zcode_patcher.py --enhance-prompt --revert
 ref 档必然查不到 → 掉进兜底档 → 打到别的供应商 → `HTTP 400 Model is unavailable`。
 
 **修复（0.5.10）**：handler 改为 **`provider_config.json` 优先、`config.json` 仅补缺**，
-把两份归一化成统一候选表（去重，保留权威源同名条目），再走四档解析。
+把两份归一化成统一候选表（去重，保留权威源同名条目），再走档位解析。
 这样「界面选中的 provider/model」与「handler 读到的」来自**同一个文件**，从根上对齐。
 
 ### ★ 已知坑：请求打到不相干的供应商上（0.5.9 起修复）
@@ -796,20 +801,65 @@ ref 档必然查不到 → 掉进兜底档 → 打到别的供应商 → `HTTP 4
 **为什么本机能用纯属巧合**：本机 `provider` 里前面几条是 `builtin:*`（被旧逻辑跳过），
 兜底恰好落到一个有效供应商上。
 
-**修复（0.5.9）**：四档解析全部经 `usable(pp)` 判定（`baseURL` + `apiKey` + 无
+**修复（0.5.9）**：各档解析全部经 `usable(pp)` 判定（`baseURL` + `apiKey` + 无
 `systemDisabledReason`）；新增 `ref-label` 档；`label` 档放开 `builtin:` 限制；
 兜底只选真正可用的。拿不出可用候选时返回 `code:"no-model"` + 可读原因，不再构造注定失败的请求。
 **修复（0.5.10）**：权威源改为 `provider_config.json`；兜底候选排序时把
 `builtin:` / `account:` 前缀的供应商**排到最后**（用户自定义供应商优先）。
 
-### 四档解析顺序
+### 六档解析顺序（0.6.7 起）
 
-1. **ref** — 界面 `data-model-current-value` 的 `${providerId}/${modelId}` 精确命中
-2. **ref-label** — ref 的 provider 段命中，但模型改用界面显示名匹配
-3. **label** — 全部候选里按显示名匹配
-4. **fallback** — 排序后的第一个可用候选（内置/账号级排最后）
+| 档 | 来源 | 说明 |
+|---|---|---|
+| **explicit** | 右键菜单**本次**选中的模型（`override` 参数） | 最高优先级。只校验供应商可用性，不校验模型表 |
+| **config** | `<数据根>/enhance_config.json` 的 `providerId`/`modelId` | 右键菜单持久化的选择也写在这里；手改同效。每次点击热读，**零重启** |
+| **ref** | 界面 `data-model-current-value` 的 `${providerId}/${modelId}` | 精确命中 |
+| **ref-label** | ref 的 provider 段命中，模型改用界面显示名匹配 | |
+| **label** | 全部候选里按显示名匹配 | |
+| **fallback** | 排序后的第一个可用候选（`builtin:` / `account:` 排最后） | 跨机差异的高发区 |
 
-自诊断里 `how=ref` 才表示「正确用上了你在下拉菜单里选的模型」；其余档位都值得怀疑。
+> **★ 每档都必须带 `!pick` 守卫**：新增更高优先级档时，必须给**后面每一个** `pick=` 赋值
+> 补上 `!pick`，否则后面的档会静默覆盖它 —— 语法对、位置对、行为全静默。
+> 这个坑踩过两次（PR#1 的 config 档、0.6.7 的 explicit 档），现已由
+> `tests/test_enhance_handler.py::TestHotConfigSourceInvariants` 的源码顺序断言钉死。
+
+`how` 会回填到返回值（`window.__zenhanceDiag.lastResult.how`）：
+**只有 `explicit` / `config` / `ref` 才代表「用上了你指定的模型」**；`ref-label` / `label` /
+`fallback` 都值得怀疑。
+
+### ★ 右键菜单：选择润色使用的模型（0.6.7）
+
+**用法**：在润色按钮上**右键** → 菜单按供应商分组列出所有**可用**模型（`usable()`：有
+baseURL + 有 apiKey + 无 `systemDisabledReason`）→ 点选某项即生效。
+菜单顶部有「跟随界面选择（默认）」用于清除选择（等价于删掉配置里的 `providerId`/`modelId`）。
+
+**为什么"选了就生效"**：一次选择同时走两条路，互为兜底 ——
+
+1. `saveEnhanceModel()` → `zcode:enhance-model-save` → 写进 `enhance_config.json`
+   （= **config 档**，handler 每次点击热读）→ **零重启、重启后依然沿用**；
+2. 本次点击把选择作为 `override` 参数传给 `enhancePrompt()` → **explicit 档**（最高优先级）
+   → 即使文件写入失败或被别处改动，这一次点击也一定用它。
+
+**设计要点**：
+
+- 菜单清单走 `listEnhanceModels()`，它在主进程里**复用 enhance-prompt 的同一份候选表**
+  （`{list:true}` 分支，不发任何补全请求）。这样「菜单里能选的」与「发请求时能用的」
+  **永远同源**，不会出现两套逻辑漂移导致的「菜单里能选、点了报不可用」。
+- 菜单是挂在 `document.body` 上的 **fixed 浮层**，**不进 composer 子树** —— 既不会被
+  虚拟列表 / 重渲染搬走，也不参与输入框布局（不会再把图标位置搞乱）。
+- `zcode:enhance-model-save` **只增删 `providerId`/`modelId` 两个键**，
+  `maxTokens` / `temperature` / 思考强度等参数原样保留 —— 选个模型不该抹掉你调好的参数。
+- 写失败会**显式报错**（toast），不静默吞掉：否则用户以为选好了，下次点击仍走旧档位。
+
+**排障**：
+
+```bash
+python enhance_doctor.py --override-provider <id> --override-model <model>   # 模拟菜单选择
+```
+
+第 2c 节会直接显示 `enhance_config.json` 当前指定的模型（以及它是否在压过界面选择），
+第 3 节显示最终命中的档位。DevTools 里 `window.__zenhanceDiag.overrideModel` 是当前会话内
+选中的模型，`lastRequest.override` 是实际随请求发出的值。
 
 ### 错误归因与重试（0.5.9）
 
@@ -833,16 +883,19 @@ python enhance_doctor.py --probe                               # 加真实连通
 python enhance_doctor.py --probe --model-value "builtin:zai-coding-plan/GLM-5.2"
 ```
 
-**它逐段复刻 handler 的解析逻辑**（同一套「provider_config.json 优先 + 四档」），
+**它逐段复刻 handler 的解析逻辑**（同一套「provider_config.json 优先 + 六档」），
 所以「脚本判定用哪个供应商」= 「按钮实际会用哪个」。支持
 `--model-value`（界面 ref，形如 `providerId/modelId`）/ `--model-label`（界面显示名）
-模拟界面选择；不给就演示最坏情况。
-输出含解析路径（`ref`/`ref-label`/`label`/`fallback`）、关键字段、请求 URL / `max_tokens`、
-**两份配置的差异审计**（`2b` 节，列出只存在于权威源/旧副本的供应商与字段差异）。
+模拟界面选择，`--override-provider` + `--override-model` 模拟右键菜单的 explicit 档；
+不给就演示最坏情况。
+输出含解析路径（`explicit`/`config`/`ref`/`ref-label`/`label`/`fallback`）、关键字段、
+请求 URL / `max_tokens`、**两份配置的差异审计**（`2b` 节）与
+**热配置当前值**（`2c` 节，即右键菜单写入的选择）。
 退出码 0 = 无阻断，1 = 发现会导致失败的问题。
 
-> **判读要点**：只有 `how=ref` 才代表「用上了你在下拉菜单里选的模型」。
-> `fallback` = 打到了别的供应商（正是跨机差异的症状）。
+> **判读要点**：只有 `how=explicit` / `config` / `ref` 才代表「用上了你指定的模型」。
+> `fallback` = 打到了别的供应商（正是跨机差异的症状）；
+> `config` 但模型不是你想要的 = 菜单/配置文件里残留了旧选择（看 `2c` 节）。
 
 界面侧自诊断：DevTools（`Ctrl+Shift+I`）里看 `window.__zenhanceDiag`——
 `lastRequest.modelValue`（空 = ref 通道失效）、`modelCandidates`（>1 = 页面有多个模型节点）、

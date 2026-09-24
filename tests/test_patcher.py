@@ -826,10 +826,24 @@ class TestGeneratedJs(unittest.TestCase):
         self._check("const o={" + zp._models_preload_block("_").decode()
                     + zp._enhance_preload_block("_").decode() + "x:1};")
 
+    def test_enhance_preload_exposes_menu_bridges(self):
+        """右键菜单依赖的两个桥方法必须都暴露，且 override 必须能透传。
+
+        缺 `listEnhanceModels` → 菜单打不开；缺 `saveEnhanceModel` → 选了不生效；
+        缺 `override` 形参 → 菜单选了但本次点击仍用旧模型（静默失效）。
+        """
+        code = zp._enhance_preload_block("_").decode()
+        self.assertIn("enhancePrompt", code)
+        self.assertIn("listEnhanceModels", code)
+        self.assertIn("saveEnhanceModel", code)
+        self.assertIn("override:ov", code, "enhancePrompt 必须把 override 透传给主进程")
+        self.assertIn('zcode:enhance-model-save', code)
+
     def test_enhance_main_injection_is_valid_js(self):
         code = zp._enhance_main_block("j").decode()
         self._check(code)
         self.assertIn("zcode:enhance-prompt", code)
+        self.assertIn("zcode:enhance-model-save", code)
         self.assertIn("chat/completions", code)
 
     def test_enhance_resolution_never_ships_models_from_disabled_providers(self):
@@ -844,11 +858,16 @@ class TestGeneratedJs(unittest.TestCase):
         code = zp._enhance_main_block("j").decode()
         self.assertIn("function usable(", code, "必须存在可用性判定")
         self.assertIn("systemDisabledReason", code, "必须排除被系统禁用的供应商")
-        # 四档解析都必须走 cand()/usable()，不能有任何一条绕过判定直接 pick
+        # 各档解析都必须走 cand()/usable()，不能有任何一条绕过判定直接 pick
         self.assertIn('cand(pid,mid,"ref")', code)
         self.assertIn('cand(pid,mid,"ref-label")', code)
         self.assertIn('cand(pid,mid,"label")', code)
         self.assertIn('cand(c.pid,mid,"fallback")', code)
+        # 0.6.7 新增的两档（右键菜单 explicit / 热配置 config）同样不得绕过可用性判定
+        self.assertIn('cand(opid,omid,"explicit")', code,
+                      "explicit 档必须经 cand()/usable()，不能无条件采信渲染进程传来的 override")
+        self.assertIn('cand(cpid,cmid,"config")', code,
+                      "config 档必须经 cand()/usable()，配置指向失效供应商时要能回退")
         self.assertNotIn('pick={pid:pid,mid:mid,p:pp};how="fallback"', code,
                          "兜底档不得绕过可用性判定")
         # 失败时必须给出原因与轨迹，前端才能做友好提示

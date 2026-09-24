@@ -1,19 +1,19 @@
 {
   "name": "zcode-toolkit",
-  "description": "ZCode 桌面客户端增强补丁（zcode-tokenspeed）：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词、模型拉取按钮。全部幂等、可核查、可精确还原。",
+  "description": "ZCode 桌面客户端增强补丁（zcode-tokenspeed）：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词（右键选模型）、模型拉取按钮。全部幂等、可核查、可精确还原。",
   "plugins": [
     {
       "name": "zcode-tokenspeed",
       "source": "./",
-      "version": "0.6.6",
+      "version": "0.6.7",
       "icon": "https://raw.githubusercontent.com/c80361619/zcode-toolkit/main/assets/icon.png",
-      "description": "ZCode 桌面客户端本地补丁注入工具：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词按钮、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
+      "description": "ZCode 桌面客户端本地补丁注入工具：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词按钮（右键可选润色所用模型）、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
       "displayName": "ZCode Patcher",
       "displayName_i18n": {
         "zh-CN": "ZCode 本地补丁注入"
       },
       "description_i18n": {
-        "zh-CN": "为 ZCode 桌面客户端注入本地增强补丁：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词、设置页模型拉取按钮。支持逐项开关，全部幂等、可精确还原。"
+        "zh-CN": "为 ZCode 桌面客户端注入本地增强补丁：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词（在按钮上右键可选择润色所用模型）、设置页模型拉取按钮。支持逐项开关，全部幂等、可精确还原。"
       },
       "category": "developer-tools",
       "tags": [

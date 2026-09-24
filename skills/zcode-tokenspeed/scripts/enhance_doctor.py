@@ -9,6 +9,8 @@ r"""增强提示词（润色按钮）链路诊断 —— 只读，默认不发�
     python enhance_doctor.py --probe         # 额外做真实连通性探测（会消耗极少量额度）
     python enhance_doctor.py --probe --only <providerId>
     python enhance_doctor.py --model-value "bc73e3ab-.../glm-5.3" --model-label "glm-5.3"
+    python enhance_doctor.py --override-provider <id> --override-model <model>
+                                             # 模拟右键菜单选中的模型（explicit 档）
 
 它逐段复刻 app.asar 里 `zcode:enhance-prompt` handler 的解析逻辑，因此
 **本脚本判定用哪个供应商/模型，就等于润色按钮实际会用哪个**。
@@ -17,8 +19,11 @@ r"""增强提示词（润色按钮）链路诊断 —— 只读，默认不发�
   1. 数据根定位（setting.json 的 dataBaseDir 优先，退回 ~/.zcode/v2）
   2. 两份配置：provider_config.json（**权威**，客户端就是从这里发请求）与
      config.json（旧格式，可能长期不更新）
-  3. 归一化后的候选表 + 模型解析四档（① ref ② ref-label ③ label ④ fallback）
-     ④ 兜底是「模型不可用」的高发区 —— 它会把请求打到不相干的供应商上
+  2b. 两份配置的差异审计
+  2c. enhance_config.json（右键菜单 / 手改的热配置，**零重启生效**）
+  3. 归一化后的候选表 + 模型解析**六档**：
+     explicit（右键菜单本次指定）→ config（enhance_config.json）→ ref → ref-label
+     → label → fallback。后两档是「模型不可用」的高发区 —— 它会把请求打到不相干的供应商上
   4. 命中供应商的关键字段：baseURL / apiKey / kind
   5. 请求构造复核：URL 拼接、鉴权头、max_tokens（会被供应商上限卡 400）
   6. --probe 时的真实 HTTP 探测 + 错误码归因
@@ -184,8 +189,20 @@ def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
     return merged, by_id, notes, {"stats": stats, "audit": audit}
 
 
-def resolve(cands: list[dict], by_id: dict, mv: str, ml_raw: str):
-    """逐字复刻 handler 的四档解析。"""
+def read_hot_config(root: Path) -> dict:
+    """读 enhance_config.json（右键菜单 / 手改的热配置）—— 不存在或写坏都当空。"""
+    d = _read_json(root / "enhance_config.json")
+    return d if isinstance(d, dict) else {}
+
+
+def resolve(cands: list[dict], by_id: dict, mv: str, ml_raw: str,
+            override: dict | None = None, cfg: dict | None = None):
+    """逐字复刻 handler 的**六档**解析。
+
+    顺序与 handler 源码必须一致（谁在前谁赢）：
+      explicit（右键菜单本次指定）→ config（enhance_config.json）→ ref
+      → ref-label → label → fallback
+    """
     ml = str(ml_raw or "").strip().lower()
     tried: list[str] = []
 
@@ -204,6 +221,25 @@ def resolve(cands: list[dict], by_id: dict, mv: str, ml_raw: str):
     def models_of(pid):
         c = by_id.get(pid)
         return c["models"] if c else []
+
+    # ★ explicit：右键菜单本次选中的模型（随请求一起传），最高优先级。
+    #   只校验供应商可用性，不校验模型表 —— 与 handler 同口径。
+    if override:
+        opid = str(override.get("providerId") or "").strip()
+        omid = str(override.get("modelId") or "").strip()
+        if opid and omid:
+            c = cand(opid, omid, "explicit")
+            if c:
+                return c, "explicit", tried
+
+    # ⓪ config：enhance_config.json 里的持久化选择（右键菜单写入的也是它）。
+    if cfg:
+        cpid = str(cfg.get("providerId") or "").strip()
+        cmid = str(cfg.get("modelId") or "").strip()
+        if cpid and cmid:
+            c = cand(cpid, cmid, "config")
+            if c:
+                return c, "config", tried
 
     if mv and "/" in mv:
         k = mv.index("/")
@@ -317,15 +353,28 @@ def main() -> int:
                     help="模拟界面给的 data-model-current-value（providerId/modelId）")
     ap.add_argument("--model-label", default="",
                     help="模拟界面显示的模型名（ref 解析失败时的后备）")
+    ap.add_argument("--override-provider", default="",
+                    help="模拟右键菜单选中的供应商 id（explicit 档，最高优先级）")
+    ap.add_argument("--override-model", default="",
+                    help="模拟右键菜单选中的模型 id（需与 --override-provider 同时给出）")
     args = ap.parse_args()
 
     root, how = resolve_root()
     cands, by_id, notes, extra = build_candidates(root)
+    hot = read_hot_config(root)
     problems: list[str] = []
     report: dict = {"config_root": str(root), "root_how": how,
                     "candidate_count": len(cands),
                     "sources": extra["stats"],
-                    "cross_config_diffs": extra["audit"]}
+                    "cross_config_diffs": extra["audit"],
+                    "hot_config": {"path": str(root / "enhance_config.json"),
+                                   "present": bool(hot),
+                                   "providerId": str(hot.get("providerId") or ""),
+                                   "modelId": str(hot.get("modelId") or ""),
+                                   "maxTokens": hot.get("maxTokens"),
+                                   "temperature": hot.get("temperature"),
+                                   "reasoningEffort": hot.get("reasoningEffort"),
+                                   "thinkingBudget": hot.get("thinkingBudget")}}
 
     def say(*a):
         """人读模式下才打印——--json 时保持 stdout 只剩 JSON。"""
@@ -355,15 +404,35 @@ def main() -> int:
             for d in diffs:
                 say(f"       {d}")
 
-    say("3. 模型解析（复刻 handler 四档）")
+    # 2c. 热配置（右键菜单写入的就是它）—— 它压过界面选择，最容易造成「我明明选了 A，却用了 B」
+    hc = report["hot_config"]
+    if hc["providerId"] and hc["modelId"]:
+        say(f"{WARN} 2c. enhance_config.json 指定了模型 → **压过界面选择**")
+        say(f"   {hc['providerId']} / {hc['modelId']}")
+        say("   （右键菜单选模型写的就是这里；要恢复「跟随界面选择」，"
+            "在菜单里点「跟随界面选择」或删掉这两个键）")
+    elif hc["present"]:
+        say(f"{OK} 2c. enhance_config.json 存在，但未指定供应商/模型 → 跟随界面选择")
+    else:
+        say(f"{OK} 2c. 没有 enhance_config.json → 完全跟随界面选择")
+
+    say("3. 模型解析（复刻 handler 六档：explicit → config → ref → ref-label → label → fallback）")
     mv, ml = args.model_value.strip(), args.model_label.strip()
+    ov = None
+    if args.override_provider.strip() and args.override_model.strip():
+        ov = {"providerId": args.override_provider.strip(),
+              "modelId": args.override_model.strip()}
+        say(f"   右键菜单 explicit = {ov['providerId']} / {ov['modelId']}")
+    elif args.override_provider.strip() or args.override_model.strip():
+        say(f"{WARN}   --override-provider/--override-model 必须成对给出，本次忽略")
     if mv:
         say(f"   界面 ref = {mv!r} / 显示名 = {ml!r}")
     else:
         say("   （未提供 --model-value，演示最坏情况：界面 ref 读不到）"
             f" 显示名 = {ml or '(空)'!r}")
-    pick, how_used, tried = resolve(cands, by_id, mv, ml)
-    report["resolve"] = {"modelValue": mv, "modelLabel": ml, "how": how_used,
+    pick, how_used, tried = resolve(cands, by_id, mv, ml, override=ov, cfg=hot)
+    report["resolve"] = {"modelValue": mv, "modelLabel": ml, "override": ov,
+                         "how": how_used,
                          "providerId": pick and pick["pid"],
                          "modelId": pick and pick["mid"],
                          "tried": tried[:6]}
@@ -371,7 +440,7 @@ def main() -> int:
         problems.append("没有解析出任何模型 -> 润色直接报「没有可用的模型」")
         say(f"{BAD}   解析结果：无")
     else:
-        tag = OK if how_used == "ref" else WARN
+        tag = OK if how_used in ("explicit", "config", "ref") else WARN
         if how_used == "fallback":
             tag = BAD
         say(f"{tag}   命中 {pick['pid']} / {pick['mid']}   (how={how_used})")
@@ -379,6 +448,11 @@ def main() -> int:
         if how_used == "fallback":
             say("         兜底档：把请求打给了「第一个可用的自定义供应商」")
             say("         ★ 跨机差异的主因 —— 与你界面上选的模型无关")
+        if how_used == "explicit":
+            say("         右键菜单本次指定：压过热配置与界面选择")
+        if how_used == "config":
+            say("         热配置档：由 enhance_config.json 指定（右键菜单写入）")
+            say("         ★ 若这不是你想用的模型：在菜单里重选，或删掉该文件的 providerId/modelId")
         if how_used == "label":
             say("         按显示名反查：ref 通道没取到值"
                 "（界面 DOM 里没有 data-model-current-value 或取值失败）")
@@ -440,7 +514,8 @@ def main() -> int:
     print("=" * 68)
     if not problems:
         print(f"{OK} 结论：配置侧没发现阻断项。")
-        print("   若仍不正常，请确认界面选中的模型与解析结果一致（看第 3 节 how= 是否为 ref）")
+        print("   若仍不正常，请确认界面选中的模型与解析结果一致"
+              "（看第 3 节 how= 是否为 explicit / config / ref）")
         return 0
     print(f"{BAD} 结论：发现 {len(problems)} 个会导致润色失败的问题：")
     for i, s in enumerate(problems, 1):

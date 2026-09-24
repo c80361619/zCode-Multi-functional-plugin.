@@ -62,7 +62,11 @@ ZCode 客户端补丁工具
 
 七、增强提示词（app.asar，--enhance-prompt）
   在输入框工具栏注入「增强提示词」按钮：取当前草稿 → 经 preload 桥 / main handler 用
-  **界面当前选中的模型**调一次对话补全 → 写回输入框，按钮临时变「恢复原文」可一键还原。
+  **选定**的模型调一次对话补全 → 写回输入框，按钮临时变「恢复原文」可一键还原。
+  **在按钮上右键**弹出模型选择菜单（按供应商分组，只列可用模型）：选中即写进
+  enhance_config.json（零重启生效、重启后沿用），本次点击同时经 override 参数走
+  **explicit 档**（最高优先级），文件写入失败也不会用错模型。
+  模型解析共六档：explicit → config → ref → ref-label → label → fallback。
   提示词模板内置（_ENHANCE_SYSTEM_PROMPT / _ENHANCE_USER_TEMPLATE）：保持原语言、只输出改写结果、
   不回答问题、不加解释。四组件注入与还原走与模型拉取按钮同一套通用链路
   （_process_ipc_patch），preload/main 注入段按 /*zp:begin:<块名>*/ 标记定界，两者互不干扰。
@@ -1387,20 +1391,32 @@ catch(n){return{success:!1,error:String(n)}}});
 # ------------------------------------------------------------ 增强提示词的注入块
 
 def _enhance_preload_block(electron_alias: str) -> bytes:
+    """暴露 3 个桥方法：
+      enhancePrompt(text, modelValue, modelLabel, override)
+        —— override = {providerId, modelId}，右键菜单选中的模型，本次请求最高优先级；
+      listEnhanceModels()  —— 走同一通道取 {list:true}，回可用供应商+模型清单；
+      saveEnhanceModel(o)  —— 把选择持久化进 enhance_config.json（零重启生效）。
+    """
     e = electron_alias
-    body = (f'enhancePrompt:(t,n,o)=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",'
-            f'{{text:t,modelValue:n,modelLabel:o}}),').encode()
+    body = (f'enhancePrompt:(t,n,o,ov)=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",'
+            f'{{text:t,modelValue:n,modelLabel:o,override:ov}}),'
+            f'listEnhanceModels:()=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",{{list:!0}}),'
+            f'saveEnhanceModel:o=>{e}.ipcRenderer.invoke("zcode:enhance-model-save",o),').encode()
     return _wrap_block(ENHANCE_BLOCK, body)
 
 
 def _enhance_main_block(ipc_alias: str) -> bytes:
-    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入「增强提示词」handler。
-    用界面当前选中的模型（config.json 里解析 baseURL/apiKey/kind）调一次对话补全，
+    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入「增强提示词」相关 handler：
+      ① zcode:enhance-prompt      —— 用指定模型（explicit/config/ref/… 六档解析）调一次补全；
+                                     传 {list:true} 时只回可用模型清单（右键菜单用）。
+      ② zcode:enhance-model-save  —— 把右键菜单选中的供应商/模型持久化进 enhance_config.json，
+                                     使后续点击（乃至重启后）默认沿用该模型。
     提示词与 WorkBuddy 的 input.enhance 功能同源。"""
     body = (_ENHANCE_HANDLER
             .replace("__H__", ipc_alias)
             .replace("__SYS__", json.dumps(_ENHANCE_SYSTEM_PROMPT, ensure_ascii=False))
             .replace("__TPL__", json.dumps(_ENHANCE_USER_TEMPLATE, ensure_ascii=False)))
+    body += "\n" + _ENHANCE_SAVE_HANDLER.replace("__H__", ipc_alias)
     return _wrap_block(ENHANCE_BLOCK, body.encode())
 
 
@@ -1481,6 +1497,23 @@ for(let c of pcCands)seen[c.pid]=1;
 let all=pcCands.slice();
 for(let c of cfgCands){if(seen[c.pid])continue;all.push(c);seen[c.pid]=1}
 let byId={};for(let c of all)byId[c.pid]=c;
+// ============================================================
+// 「列出可用模型」模式（右键菜单用）：与 enhance-prompt **同一通道、同一份候选表**。
+// 传 {list:true} 时只回候选表、不发任何补全请求 —— 这样菜单的模型清单与真正发请求时
+// 用的候选表**永远同源**，不会出现「菜单里能选、点了却报不可用」的两套逻辑漂移。
+// 只列 usable() 的供应商：列出来点了也只会撞 400/401，不如不显示。
+// ============================================================
+if(t&&t.list){
+let groups=[];
+for(let c of all){
+if(!usable(c.p))continue;
+let ms=[],mm=(c.p||{}).models||{};
+for(let mid of Object.keys(mm))ms.push({id:mid,name:String((mm[mid]||{}).name||mid)});
+groups.push({providerId:c.pid,name:String(c.name||c.pid),models:ms})}
+let cur=null;
+let cpid=String(cfg.providerId||"").trim(),cmid=String(cfg.modelId||"").trim();
+if(cpid&&cmid)cur={providerId:cpid,modelId:cmid};
+return{success:!0,groups:groups,current:cur}}
 let text=String((t&&t.text)||"").trim();
 if(!text)return{success:!1,code:"empty",error:"输入框是空的"};
 let mv=String((t&&t.modelValue)||"").trim();
@@ -1498,10 +1531,18 @@ function cand(pid,mid,n){
 tried.push(n+":"+pid+"/"+mid+(usable((byId[pid]||{}).p)?"":"(跳过:不可用)"));
 if(!byId[pid]||!usable(byId[pid].p))return null;
 return{pid:pid,mid:mid,p:byId[pid].p,how:n,name:(byId[pid].name||"")}}
-// ⓪ 用户在 enhance_config.json 里显式指定的供应商+模型 —— 最高优先级。
+// ★ 显式指定（右键菜单里刚选中的模型，随本次请求一起传）—— **最高优先级**：
+//    压过热配置档与界面选择。用户刚在菜单里点过它，这一次点击就必须用它。
+//    与 ⓪ 档同口径：只校验供应商可用性，不校验模型表（允许中转站模型变体名）。
+//    ★ 必须带 !pick 守卫：否则下面的 ⓪ 档会把它覆盖掉（同款历史 bug，见 ⓪ 档注释）。
+if(!pick&&t&&t.override&&String(t.override.providerId||"").trim()&&String(t.override.modelId||"").trim()){
+let opid=String(t.override.providerId).trim(),omid=String(t.override.modelId).trim();
+if(byId[opid]&&usable(byId[opid].p)){let oc=cand(opid,omid,"explicit");if(oc)pick=oc}}
+// ⓪ 用户在 enhance_config.json 里显式指定的供应商+模型 —— 次高优先级。
 //    只要求供应商可用（key/baseURL 齐全），不校验模型表：允许发表里没有、
 //    但中转站实际支持的模型名（也是自定义思考强度模型变体的入口）。
-if(cfg&&String(cfg.providerId||"").trim()&&String(cfg.modelId||"").trim()){
+//    ★ 必须带 !pick 守卫：右键菜单的 explicit 档在它前面，缺守卫就会把 explicit 覆盖掉。
+if(!pick&&cfg&&String(cfg.providerId||"").trim()&&String(cfg.modelId||"").trim()){
 let cpid=String(cfg.providerId).trim(),cmid=String(cfg.modelId).trim();
 let cp=byId[cpid];
 if(cp&&usable(cp.p)){pick=cand(cpid,cmid,"config")}}
@@ -1648,6 +1689,35 @@ return{success:!1,code:fc.kind||fin.code||"error",status:fin.status,
 error:fin.error||"增强失败",tip:fc.tip||"请检查模型与供应商配置",
 provider:pick.pid,model:pick.mid,tried:tried.slice(0,4)};
 }catch(err2){return{success:!1,code:"exception",error:"增强失败："+String(err2&&err2.message||err2),tip:"内部异常，请把这条信息反馈给插件作者"}}});
+'''
+
+# 右键菜单「选择模型」的持久化 handler：把选中的供应商/模型写进 enhance_config.json。
+# 该文件正是 enhance-prompt handler 每次点击都会热读的 ⓪ 档来源，因此**零重启即生效**。
+# 设计取舍：只增删 providerId/modelId 两个键，其余参数（maxTokens/temperature/思考强度）原样保留；
+# 写坏 JSON / 目录不存在 / 文件被占用都必须在返回值里说清楚，不能静默失败 ——
+# 静默失败会让用户以为「选了模型」，实际下一次点击仍走旧档位。
+_ENHANCE_SAVE_HANDLER = '''
+__H__.handle("zcode:enhance-model-save",async(ev,t)=>{
+try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=r.join(base,".zcode","v2"),f=r.join(root,"enhance_config.json");
+let cfg={};
+try{cfg=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){cfg={}}
+if(!cfg||typeof cfg!="object"||Array.isArray(cfg))cfg={};
+let pid=String((t&&t.providerId)||"").trim(),mid=String((t&&t.modelId)||"").trim();
+if((t&&t.clear)||(!pid&&!mid)){
+// 恢复「跟随界面选择」：只摘掉这两个键，其它热配置参数保持不动
+delete cfg.providerId;delete cfg.modelId}
+else{
+if(!pid||!mid)return{success:!1,error:"providerId 与 modelId 必须同时给出"};
+cfg.providerId=pid;cfg.modelId=mid}
+if(!n.existsSync(root))n.mkdirSync(root,{recursive:!0});
+n.writeFileSync(f,JSON.stringify(cfg,null,2),"utf-8");
+return{success:!0,providerId:String(cfg.providerId||""),modelId:String(cfg.modelId||""),path:f}
+}catch(err){return{success:!1,error:"写入 enhance_config.json 失败："+String(err&&err.message||err)}}});
 '''
 
 

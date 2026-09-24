@@ -328,13 +328,122 @@ check(doc.querySelectorAll(BTN).length === 1, "幂等：按钮只应有一个");
 
 // 诊断字段
 const d = sandbox.__zenhanceDiag || {};
-check(d.scriptVersion === "1.4", "diag.scriptVersion 应为 1.4，实际=" + d.scriptVersion);
+check(d.scriptVersion === "1.5", "diag.scriptVersion 应为 1.5，实际=" + d.scriptVersion);
 check(d.buttonAttached === true, "diag.buttonAttached 应为 true");
 check(d.mountWhere === "prepend", "diag.mountWhere 应为 prepend，实际=" + d.mountWhere);
 
-if (bad.length) {
-  console.error("enhance mount smoke FAIL");
-  for (const b of bad) console.error("  - " + b);
-  process.exit(1);
+// ---------------------------------------------------------------- 右键菜单
+// 场景：右键按钮 → 菜单列出可用模型 → 选中某个 → 持久化 + 后续润色带上它。
+// 为什么必须行为级验证：菜单里「选中了」和「真的用上了」是两件事 ——
+// 只断言 DOM 里有对勾，抓不到「选择没传进 enhancePrompt」这类静默失效。
+// 关键断言：①菜单是 body 上的 fixed 浮层，绝不进 composer 子树
+//           ②清单来自 listEnhanceModels()（与发请求同源）
+//           ③选中即持久化 ④下一次点击 enhancePrompt 第 4 参带 override
+const tickAsync = () => new Promise((r) => setImmediate(r));
+const fire = (el, type, ev) => { for (const fn of (el.__listeners[type] || [])) fn(ev); };
+const evt = (extra) => Object.assign({ preventDefault() {}, stopPropagation() {} }, extra || {});
+
+async function menuTests() {
+  const calls = { list: 0, saved: [], enhance: [] };
+  sandbox.zcode = {
+    listEnhanceModels: async () => {
+      calls.list++;
+      return {
+        success: true,
+        groups: [
+          { providerId: "prov-a", name: "供应商 A",
+            models: [{ id: "model-a", name: "model-a" }, { id: "model-b", name: "model-b" }] },
+          { providerId: "prov-b", name: "供应商 B", models: [{ id: "model-c", name: "model-c" }] },
+        ],
+        current: null,
+      };
+    },
+    saveEnhanceModel: async (o) => { calls.saved.push(o); return { success: true }; },
+    enhancePrompt: async (text, mv, ml, ov) => {
+      calls.enhance.push({ text, mv, ml, ov });
+      return { success: true, text: "ENHANCED", model: "model-a" };
+    },
+  };
+
+  const menu = () => doc.getElementById("zenhance-model-menu");
+  const btnEl = btn();
+  check(!!btnEl, "菜单测试前置：按钮应存在");
+
+  // ① 右键弹出菜单
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!!menu(), "右键后应弹出模型选择菜单");
+  check(calls.list === 1, "菜单应经 listEnhanceModels() 取清单，实际调用 " + calls.list + " 次");
+  check(!!menu() && menu().parentElement === doc.body,
+    "菜单应挂在 body 上（fixed 浮层），实际 parent="
+    + (menu() && menu().parentElement && menu().parentElement.tagName));
+  check(!!menu() && !t.dock.contains(menu()),
+    "菜单不得进入 composer 子树（会被重渲染搬走 / 撑乱布局）");
+
+  // ② 清单内容按供应商分组
+  const labels = menu().querySelectorAll(".zenhance-menu-item").map((el) => el.textContent);
+  check(labels.some((s) => s.indexOf("跟随界面选择") >= 0), "菜单应有「跟随界面选择」项");
+  check(labels.some((s) => s.indexOf("model-a") >= 0), "菜单应列出 model-a");
+  check(labels.some((s) => s.indexOf("model-c") >= 0), "菜单应列出其它供应商的 model-c");
+  check(menu().querySelectorAll(".zenhance-menu-group").length === 2,
+    "应按供应商分组，实际 " + menu().querySelectorAll(".zenhance-menu-group").length + " 组");
+  check(labels.some((s) => s.indexOf("✓") === 0),
+    "无 current 时「跟随界面选择」应打勾，实际=" + JSON.stringify(labels));
+
+  // ③ 选中 model-a → 持久化
+  const target = menu().querySelectorAll("[data-model='model-a']")[0];
+  check(!!target, "应能找到 data-model='model-a' 的菜单项");
+  fire(menu(), "click", evt({ target }));
+  await tickAsync();
+  check(calls.saved.length === 1, "选择后应调用 saveEnhanceModel 一次，实际 " + calls.saved.length);
+  check(calls.saved[0] && calls.saved[0].providerId === "prov-a"
+        && calls.saved[0].modelId === "model-a",
+    "saveEnhanceModel 应收到 {providerId, modelId}，实际 " + JSON.stringify(calls.saved[0]));
+  check(!menu(), "选完应关闭菜单");
+  const d2 = sandbox.__zenhanceDiag || {};
+  check(!!d2.overrideModel && d2.overrideModel.modelId === "model-a",
+    "diag.overrideModel 应记录选择，实际 " + JSON.stringify(d2.overrideModel));
+
+  // ④ 下一次点击必须把 override 交给主进程（explicit 档）
+  t.input.textContent = "帮我写个函数";
+  fire(btnEl, "click", evt());
+  await tickAsync();
+  check(calls.enhance.length === 1, "应触发一次 enhancePrompt，实际 " + calls.enhance.length);
+  const last = calls.enhance[0] || {};
+  check(!!last.ov && last.ov.providerId === "prov-a" && last.ov.modelId === "model-a",
+    "enhancePrompt 第 4 参应带 override，实际 " + JSON.stringify(last.ov));
+
+  // ⑤ 「跟随界面选择」→ clear:true，且 override 归零
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  const follow = menu().querySelectorAll("[data-value='__follow__']")[0];
+  check(!!follow, "应能找到「跟随界面选择」项");
+  fire(menu(), "click", evt({ target: follow }));
+  await tickAsync();
+  check(calls.saved.length === 2 && calls.saved[1] && calls.saved[1].clear === true,
+    "「跟随界面选择」应传 clear:true，实际 " + JSON.stringify(calls.saved[1]));
+  check(!(sandbox.__zenhanceDiag || {}).overrideModel,
+    "clear 后 overrideModel 应回到 null");
+
+  // ⑥ 菜单开着时再右键 = 收起（不能叠出两个）
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!!menu(), "右键应再次打开菜单");
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!menu(), "菜单打开时再右键应收起");
+  check(doc.querySelectorAll("#zenhance-model-menu").length === 0, "不应残留菜单节点");
 }
-console.log("enhance mount smoke OK (states=6, mount=" + where(btn()) + ")");
+
+menuTests().then(() => {
+  if (bad.length) {
+    console.error("enhance mount smoke FAIL");
+    for (const b of bad) console.error("  - " + b);
+    process.exit(1);
+  }
+  console.log("enhance mount smoke OK (states=6, menu=ok, mount=" + where(btn()) + ")");
+}).catch((err) => {
+  console.error("enhance mount smoke CRASH");
+  console.error("  " + (err && err.stack || err));
+  process.exit(1);
+});
