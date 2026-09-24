@@ -2153,8 +2153,20 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         except Exception:
             saved = None
 
+    # 注入源脚本：显式指定优先，否则取本脚本同目录下的同名文件。
+    # 放在 check 之前解析 —— check 也要做内容比对（见下）。
+    if src_path is None:
+        src_path = Path(__file__).resolve().parent / script_entry.split("/")[-1]
+
     if check_only:
         state = "已打" if installed else ("不完整（index.html 有 tag 但缺脚本条目）" if tagged else "未打")
+        # 已注入、但脚本内容与现行源不一致 → 必须显式报 stale。
+        # 只按「结构在不在」判会输出裸「已打」，sync.check_state() 据此判 on → run_sync 走
+        # `continue`（视为已一致）→ 脚本改了**永远不生效，而且一句报错都没有**。
+        # 特征串必须与模型拉取链路（--model-puller）逐字一致：check_state() 只认「含旧版组件」。
+        if installed and src_path.is_file() and \
+                _asar_entry_bytes(raw, data_start, paths[script_entry]) != src_path.read_bytes():
+            state = "已打（含旧版组件，重跑可自动更新）"
         print(f"[*] {asar}\n    {label}注入: {state} | sidecar: {'有' if saved else '无'} | 备份: {'有' if bak.is_file() else '无'}")
         return True
 
@@ -2182,8 +2194,6 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         print(f"[+] {asar}\n    已移除{label}注入（新大小 {new_size:,} 字节，备份已清理）")
         return True
 
-    if src_path is None:
-        src_path = Path(__file__).resolve().parent / script_entry.split("/")[-1]
     if not src_path.is_file():
         print(f"[!] 找不到注入源脚本 {src_path}（可用对应 --*-src 指定路径）")
         return False

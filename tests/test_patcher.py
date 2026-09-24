@@ -1139,6 +1139,74 @@ class TestCheckStateWording(unittest.TestCase):
         self.assertEqual(self._state("完全看不懂的输出"), "unknown")
 
 
+class TestScriptInjectStaleDetection(TempCase):
+    """`--tps-footer` / `--thought-slider` 的 `--check` 必须能报出「脚本是旧版」。
+
+    锁死的是一个真实故障：`_process_script_inject` 的 check 分支原先只判
+    「index.html 有 tag 且脚本条目存在」，**从不比对脚本内容** —— 于是旧脚本也打
+    裸「已打」→ `sync.check_state()` 判 on → `run_sync` 走 `continue`（视为已一致）
+    → **脚本改了永远不生效，而且一句报错都没有**。
+
+    这与 `--model-puller` 那条链路（会算 old_script 并输出「含旧版组件」）不一致，
+    正是同一个「静默失效链」的第三个入口。特征串必须逐字一致：
+    `check_state()` 只认「含旧版组件」。
+    """
+
+    INDEX = "out/renderer/index.html"
+    SCRIPT = "out/renderer/zcode-tps.js"
+    TAG = '<script src="./zcode-tps.js"></script>'
+
+    def _build(self, injected: bytes) -> None:
+        self.asar = self.tmp / "app.asar"
+        build_asar(self.asar, {
+            self.INDEX: ("<html><body>" + self.TAG + "</body></html>").encode("utf-8"),
+            self.SCRIPT: injected,
+        })
+        self.src = self.tmp / "zcode-tps.js"
+        self.src.write_bytes(b"console.log('new-version');")
+
+    def _check(self) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok = zp.process_tps_footer(self.asar, True, False, self.src)
+        self.assertTrue(ok)
+        return buf.getvalue()
+
+    def test_old_script_is_reported_stale(self):
+        self._build(b"console.log('old-version');")
+        self.assertIn("含旧版组件", self._check(),
+                      "旧版脚本被误报成「已打」→ sync 会永久跳过它，改动永不生效")
+
+    def test_same_script_is_plain_on(self):
+        self._build(b"console.log('new-version');")
+        out = self._check()
+        self.assertNotIn("含旧版组件", out, "脚本同源时不该报 stale（否则每次会话都白跑一次注入）")
+        self.assertIn("已打", out)
+
+    def test_missing_source_neither_crashes_nor_lies(self):
+        """注入源找不到时只能报结构状态：不能炸，也不能谎报 stale。"""
+        self._build(b"console.log('old-version');")
+        self.src.unlink()
+        out = self._check()
+        self.assertIn("已打", out)
+        self.assertNotIn("含旧版组件", out)
+
+    def test_slider_uses_the_same_wording(self):
+        """滑条与 TPS 共用链路，特征串必须一致，否则只有一项能被 sync 修好。"""
+        asar = self.tmp / "app2.asar"
+        build_asar(asar, {
+            self.INDEX: ("<html><body>" + '<script src="./zcode-thought-slider.js"></script>'
+                         + "</body></html>").encode("utf-8"),
+            "out/renderer/zcode-thought-slider.js": b"console.log('old');",
+        })
+        src = self.tmp / "zcode-thought-slider.js"
+        src.write_bytes(b"console.log('new');")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertTrue(zp.process_thought_slider(asar, True, False, src))
+        self.assertIn("含旧版组件", buf.getvalue())
+
+
 class TestProcessProbeDecodesSafely(unittest.TestCase):
     """进程探测器必须能同时接住 subprocess 返回的 str 和 bytes。
 
