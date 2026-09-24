@@ -850,6 +850,12 @@ baseURL + 有 apiKey + 无 `systemDisabledReason`）→ 点选某项即生效。
 - `zcode:enhance-model-save` **只增删 `providerId`/`modelId` 两个键**，
   `maxTokens` / `temperature` / 思考强度等参数原样保留 —— 选个模型不该抹掉你调好的参数。
 - 写失败会**显式报错**（toast），不静默吞掉：否则用户以为选好了，下次点击仍走旧档位。
+- **关闭策略**（0.6.8 修「菜单一出现就自动关闭」）：只有 ①点菜单外部 ②按 Esc ③再右键收起
+  三种情况会关。**滚动不关闭**，改为节流（80ms）跟随重定位 —— 客户端消息区是虚拟列表、
+  输入区 sticky，滚动极频繁，把 `scroll` 当关闭信号等于菜单刚挂上就被关掉；
+  点击关闭带 **350ms 保护期**，防止触发「打开」的那串事件（右键 mousedown/mouseup、
+  触控板多出来的事件）在监听器注册之后到达而误关；按钮被重渲染摘掉时**不立刻关**
+  （4 秒宽限 + 位置缓存），避免 composer 抖动误伤。
 
 **排障**：
 
@@ -859,7 +865,10 @@ python enhance_doctor.py --override-provider <id> --override-model <model>   # �
 
 第 2c 节会直接显示 `enhance_config.json` 当前指定的模型（以及它是否在压过界面选择），
 第 3 节显示最终命中的档位。DevTools 里 `window.__zenhanceDiag.overrideModel` 是当前会话内
-选中的模型，`lastRequest.override` 是实际随请求发出的值。
+选中的模型，`lastRequest.override` 是实际随请求发出的值；
+`menuOpens` / `menuClosedBy` 记录菜单开合次数与**最后一次的关闭原因**
+（`outside` 点外部 / `escape` / `toggle` 再右键 / `choose` 选完 / `btn-gone` 按钮长期不在）
+—— 菜单「莫名消失」时看它就知道是谁关的。
 
 ### 错误归因与重试（0.5.9）
 

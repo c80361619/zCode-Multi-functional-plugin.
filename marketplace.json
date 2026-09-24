@@ -5,7 +5,7 @@
     {
       "name": "zcode-tokenspeed",
       "source": "./",
-      "version": "0.6.7",
+      "version": "0.6.8",
       "icon": "https://raw.githubusercontent.com/c80361619/zcode-toolkit/main/assets/icon.png",
       "description": "ZCode 桌面客户端本地补丁注入工具：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词按钮（右键可选润色所用模型）、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
       "displayName": "ZCode Patcher",

@@ -30,6 +30,11 @@
  * ★ 右键菜单（1.5）：菜单是挂在 document.body 上的 fixed 浮层，**不进 composer 子树** ——
  *   这样既不干扰输入框布局，也不会被虚拟列表/重渲染搬走。模型清单与真正发请求时用的
  *   候选表**同源**（同一个 IPC 通道的 {list:true} 分支），不会出现「菜单里能选、点了报不可用」。
+ * ★ 菜单的关闭策略（1.6 修「一出现就自动关闭」）：只有 ①点菜单外部 ②按 Esc ③再右键收起
+ *   三种情况会关。**滚动不再关闭**（改节流重定位）——客户端消息区是虚拟列表、输入区 sticky，
+ *   流式输出时几乎每帧都在滚，把 scroll 当关闭信号等于菜单刚出现就被关掉。
+ *   点击关闭还带 **350ms 保护期**，防止触发「打开」的那串事件（右键 mousedown/mouseup、
+ *   触控板多出来的事件）在监听器注册之后到达而误关。
  */
 (() => {
   if (window.__zenhance) return;
@@ -40,7 +45,7 @@
   const MENU_ID = "zenhance-model-menu";
   const STYLE_ID = "zenhance-style";
   const diag = (window.__zenhanceDiag = window.__zenhanceDiag || {});
-  diag.scriptVersion = "1.5";
+  diag.scriptVersion = "1.6";
 
   const TIP_IDLE = "增强提示词（右键选择模型）";
   const TIP_BUSY = "增强中…";
@@ -130,36 +135,68 @@
   //   · 不参与输入框布局，不会把图标位置搞乱。
   // 模型清单走 listEnhanceModels()（主进程 {list:true} 分支），与真正发请求时用的是
   // **同一份候选表** —— 杜绝「菜单里能选、点了却报不可用」的两套逻辑漂移。
+  //
+  // ★ 关闭策略（1.6 修「菜单一出现就自动关闭」）：
+  //   只有三种情况才关 —— ①点菜单**外部** ②按 Esc ③再右键收起。
+  //   **滚动不再关闭**（改为节流重定位）：客户端消息区是虚拟列表、输入区 sticky，
+  //   流式输出时几乎每帧都在滚，把 scroll 当关闭信号 = 菜单刚出现就被关掉。
+  //   **点击关闭带 350ms 保护期**：触发「打开」的那串事件（右键 mousedown/mouseup、
+  //   触控板可能多出来的事件）若在监听器注册之后才到达，会把菜单当场关掉。
+  //   按钮被重渲染摘掉时**不立刻关**（4 秒宽限 + 位置缓存），避免 composer 抖动误伤。
   let menuEl = null;
   let menuOpen = false;
+  let menuOpenedAt = 0;        // 打开时刻（保护期用）
+  let menuOrphanSince = 0;     // 按钮被摘掉的时刻（宽限期用）
+  let menuLastRect = null;     // 按钮最近一次位置（按钮暂时不在时菜单不跳位）
+  let menuScrollTick = null;
   let override = null;   // 本次会话内选中的模型 {providerId, modelId}；null = 跟随界面选择
   diag.overrideModel = null;
+  diag.menuOpens = 0;
+  diag.menuClosedBy = null;
 
   function onDocDown(e) {
+    // ★ 保护期：刚打开的那一瞬间不响应「点击外部」——
+    //   否则触发打开的那串事件会把菜单当场关掉（表现就是「右击弹出后立刻消失」）。
+    if (Date.now() - menuOpenedAt < 350) return;
     // 点菜单外部 → 关闭。捕获阶段监听，避免被内部元素的 stopPropagation 吃掉。
     if (menuEl && e && e.target && menuEl.contains(e.target)) return;
-    closeMenu();
+    closeMenu("outside");
   }
   function onDocKey(e) {
-    if (e && (e.key === "Escape" || e.keyCode === 27)) closeMenu();
+    if (e && (e.key === "Escape" || e.keyCode === 27)) closeMenu("escape");
+  }
+  // ★ 滚动只重定位、不关闭（节流 80ms：滚动事件密集，直接重排会掉帧）
+  function onDocScroll() {
+    if (!menuOpen || menuScrollTick) return;
+    menuScrollTick = setTimeout(() => {
+      menuScrollTick = null;
+      if (menuOpen) placeMenu();
+    }, 80);
   }
 
-  function closeMenu() {
+  function closeMenu(why) {
     if (!menuOpen && !menuEl) return;
     menuOpen = false;
+    menuOrphanSince = 0;
+    if (why) diag.menuClosedBy = why;
+    if (menuScrollTick) { try { clearTimeout(menuScrollTick); } catch (err) { /* ignore */ } menuScrollTick = null; }
     if (menuEl) { try { menuEl.remove(); } catch (err) { /* ignore */ } }
     menuEl = null;
     try { document.removeEventListener("mousedown", onDocDown, true); } catch (err) { /* ignore */ }
     try { document.removeEventListener("keydown", onDocKey, true); } catch (err) { /* ignore */ }
-    try { document.removeEventListener("scroll", closeMenu, true); } catch (err) { /* ignore */ }
+    try { document.removeEventListener("scroll", onDocScroll, true); } catch (err) { /* ignore */ }
   }
 
   /** 定位菜单：优先贴在按钮**上方**（按钮在输入框底部，向上弹不会顶出屏幕）。 */
   function placeMenu() {
     if (!menuEl) return;
-    let r = { left: 8, top: 8, right: 8, bottom: 8, width: 0, height: 0 };
+    // 按钮暂时不在文档里（重渲染窗口）时沿用上次位置，避免菜单跳到屏幕角落
+    let r = menuLastRect || { left: 8, top: 8, right: 8, bottom: 8, width: 0, height: 0 };
     try {
-      if (btn && btn.getBoundingClientRect) r = btn.getBoundingClientRect() || r;
+      if (btn && btn.isConnected && btn.getBoundingClientRect) {
+        const rr = btn.getBoundingClientRect();
+        if (rr && (rr.width || rr.height || rr.top || rr.left)) { r = rr; menuLastRect = rr; }
+      }
     } catch (err) { /* ignore */ }
     const mh = menuEl.offsetHeight || 260;
     const mw = menuEl.offsetWidth || 240;
@@ -239,7 +276,7 @@
 
   async function chooseModel(sel) {
     const api = window.zcode;
-    closeMenu();
+    closeMenu("choose");
     if (!api || typeof api.saveEnhanceModel !== "function") {
       toast("通信桥不可用：请重跑 --enhance-prompt 注入后重启 ZCode", 7000);
       return;
@@ -275,14 +312,18 @@
   }
 
   async function openMenu() {
-    if (menuOpen) { closeMenu(); return; }   // 再按一次右键 = 收起
+    if (menuOpen) { closeMenu("toggle"); return; }   // 再按一次右键 = 收起
     const api = window.zcode;
     if (!api || typeof api.listEnhanceModels !== "function") {
       toast("通信桥不可用：请重跑 --enhance-prompt 注入后重启 ZCode", 7000);
       return;
     }
-    closeMenu();
+    closeMenu("reopen");
     menuOpen = true;
+    menuOpenedAt = Date.now();
+    menuOrphanSince = 0;
+    diag.menuOpens = (diag.menuOpens || 0) + 1;
+    diag.menuClosedBy = null;
     menuEl = document.createElement("div");
     menuEl.id = MENU_ID;
     menuEl.setAttribute(MARK, "menu");
@@ -293,7 +334,7 @@
     placeMenu();
     try { document.addEventListener("mousedown", onDocDown, true); } catch (err) { /* ignore */ }
     try { document.addEventListener("keydown", onDocKey, true); } catch (err) { /* ignore */ }
-    try { document.addEventListener("scroll", closeMenu, true); } catch (err) { /* ignore */ }
+    try { document.addEventListener("scroll", onDocScroll, true); } catch (err) { /* ignore */ }
     try {
       const data = await api.listEnhanceModels();
       if (!menuOpen || !menuEl) return;     // 读取期间已被关掉，别往已摘除的节点上写
@@ -630,8 +671,20 @@
     const input = findInput();
     if (!input) { if (btn) { btn.remove(); btn = null; } diag.hiddenReason = "未找到输入框"; return; }
 
-    // 菜单开着但按钮已被重渲染摘掉 → 菜单失去了定位依据，直接收起
-    if (menuOpen && (!btn || !btn.isConnected)) closeMenu();
+    // ★ 菜单开着时的看护：按钮在 → 跟随重定位；按钮被重渲染摘掉 → 给 4 秒宽限
+    //   （菜单保持可点），宽限内回来就继续跟随，超时才收起。
+    //   绝**不**因为「按钮这一瞬间不在」就立刻关菜单 —— composer 频繁重渲染，
+    //   那会让菜单在用户眼皮底下凭空消失。
+    if (menuOpen) {
+      if (btn && btn.isConnected) {
+        menuOrphanSince = 0;
+        placeMenu();
+      } else if (!menuOrphanSince) {
+        menuOrphanSince = Date.now();
+      } else if (Date.now() - menuOrphanSince > 4000) {
+        closeMenu("btn-gone");
+      }
+    }
 
     // ★ 挂载点 = 工具栏「右侧操作区」（与发送按钮同一组），见 findMount()。
     //   绝不再退回卡片 / dock 本体：那是输入框的祖先，往其 firstChild 插入

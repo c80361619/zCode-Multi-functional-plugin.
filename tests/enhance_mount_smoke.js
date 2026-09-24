@@ -167,8 +167,14 @@ function makeDocument() {
     createRange: () => ({ selectNodeContents() {} }),
     getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
     execCommand: () => false,
-    addEventListener() {},
-    removeEventListener() {},
+    __listeners: Object.create(null),
+    addEventListener(t, fn) { (this.__listeners[t] = this.__listeners[t] || []).push(fn); },
+    removeEventListener(t, fn) {
+      const a = this.__listeners[t];
+      if (!a) return;
+      const i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+    },
   };
   doc.body.__isBody = true;
   doc.getElementById = (id) =>
@@ -235,9 +241,12 @@ function buildTree(doc) {
 // ---------------------------------------------------------------- 跑脚本
 function boot(doc) {
   const timers = { interval: null };
+  // 可控时钟：脚本用 Date.now() 做「刚打开的保护期」判定，测试需要能把它推进过去
+  const clock = { now: 1700000000000 };
   const sandbox = {
     document: doc,
     console,
+    Date: { now: () => clock.now },
     setTimeout: () => 0,
     clearTimeout: () => {},
     setInterval: (fn) => { timers.interval = fn; return 0; },
@@ -250,7 +259,7 @@ function boot(doc) {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.runInNewContext(src, sandbox, { filename: "zcode-enhance-prompt.js" });
-  return { sandbox, timers, tick: () => timers.interval && timers.interval() };
+  return { sandbox, timers, clock, tick: () => timers.interval && timers.interval() };
 }
 
 const bad = [];
@@ -258,7 +267,7 @@ const check = (cond, msg) => { if (!cond) bad.push(msg); };
 
 const doc = makeDocument();
 const t = buildTree(doc);
-const { sandbox, tick } = boot(doc);
+const { sandbox, clock, tick } = boot(doc);
 
 const BTN = "#zcode-enhance-prompt-btn";
 const btn = () => doc.getElementById("zcode-enhance-prompt-btn");
@@ -328,7 +337,7 @@ check(doc.querySelectorAll(BTN).length === 1, "幂等：按钮只应有一个");
 
 // 诊断字段
 const d = sandbox.__zenhanceDiag || {};
-check(d.scriptVersion === "1.5", "diag.scriptVersion 应为 1.5，实际=" + d.scriptVersion);
+check(d.scriptVersion === "1.6", "diag.scriptVersion 应为 1.6，实际=" + d.scriptVersion);
 check(d.buttonAttached === true, "diag.buttonAttached 应为 true");
 check(d.mountWhere === "prepend", "diag.mountWhere 应为 prepend，实际=" + d.mountWhere);
 
@@ -341,6 +350,7 @@ check(d.mountWhere === "prepend", "diag.mountWhere 应为 prepend，实际=" + d
 //           ③选中即持久化 ④下一次点击 enhancePrompt 第 4 参带 override
 const tickAsync = () => new Promise((r) => setImmediate(r));
 const fire = (el, type, ev) => { for (const fn of (el.__listeners[type] || [])) fn(ev); };
+const fireDoc = (type, ev) => { for (const fn of (doc.__listeners[type] || []).slice()) fn(ev); };
 const evt = (extra) => Object.assign({ preventDefault() {}, stopPropagation() {} }, extra || {});
 
 async function menuTests() {
@@ -433,6 +443,56 @@ async function menuTests() {
   await tickAsync();
   check(!menu(), "菜单打开时再右键应收起");
   check(doc.querySelectorAll("#zenhance-model-menu").length === 0, "不应残留菜单节点");
+
+  // ⑦ ★ 滚动不得关闭菜单 —— 客户端消息区是虚拟列表、输入区 sticky，
+  //    流式输出时几乎每帧都在滚；把 scroll 当关闭信号 = 菜单「一出现就被关掉」。
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!!menu(), "右键应能重新打开菜单");
+  fireDoc("scroll", {});
+  fireDoc("scroll", {});
+  await tickAsync();
+  check(!!menu(), "★ 滚动不得关闭菜单（应改为跟随重定位）");
+
+  // ⑧ ★ 刚打开的 350ms 内，外部 mousedown 不得关闭菜单 ——
+  //    触发「打开」的那串事件（右键 mousedown/mouseup、触控板多出来的事件）
+  //    可能在监听器注册之后才到达，否则菜单会被当场关掉。
+  fireDoc("mousedown", { target: doc.body });
+  await tickAsync();
+  check(!!menu(), "★ 保护期内（<350ms）外部点击不得关闭菜单");
+
+  // ⑨ 保护期过后，点外部应正常关闭，并记录原因
+  clock.now += 1000;
+  fireDoc("mousedown", { target: doc.body });
+  await tickAsync();
+  check(!menu(), "保护期过后点外部应关闭菜单");
+  check((sandbox.__zenhanceDiag || {}).menuClosedBy === "outside",
+    "diag.menuClosedBy 应记录 outside，实际=" + (sandbox.__zenhanceDiag || {}).menuClosedBy);
+
+  // ⑩ Esc 关闭也要记录原因（便于线上定位「菜单为什么没了」）
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!!menu(), "右键应能再次打开菜单");
+  fireDoc("keydown", { key: "Escape" });
+  await tickAsync();
+  check(!menu(), "Esc 应关闭菜单");
+  check((sandbox.__zenhanceDiag || {}).menuClosedBy === "escape",
+    "diag.menuClosedBy 应记录 escape，实际=" + (sandbox.__zenhanceDiag || {}).menuClosedBy);
+
+  // ⑪ ★ 按钮被重渲染摘掉时，菜单不得凭空消失（composer 重渲染很频繁）
+  fire(btnEl, "contextmenu", evt());
+  await tickAsync();
+  check(!!menu(), "右键应能再次打开菜单");
+  btn().remove();
+  tick();
+  check(!!menu(), "★ 按钮被摘掉时菜单不得立刻关闭（4 秒宽限）");
+  tick();
+  check(!!menu(), "按钮被摘掉期间菜单应持续可用");
+
+  // ⑫ 诊断字段：打开次数与关闭原因可查
+  const dg = sandbox.__zenhanceDiag || {};
+  check(dg.menuOpens >= 5, "diag.menuOpens 应累计打开次数，实际=" + dg.menuOpens);
+  check(dg.menuClosedBy !== "scroll", "菜单关闭原因不应出现 scroll");
 }
 
 menuTests().then(() => {
