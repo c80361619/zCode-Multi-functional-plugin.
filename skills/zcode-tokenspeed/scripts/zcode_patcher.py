@@ -125,7 +125,7 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
     from _console import bad_mark, no_window_kwargs, ok_mark, safe_stdio
@@ -461,9 +461,13 @@ def _from_running_processes(found: list[Path]) -> None:
         out = out.decode(errors="replace")
     for line in out.splitlines():
         line = line.strip()
-        # ZCode.exe / ZCode Skin Manager 等都指向安装根目录
-        if line.lower().endswith(".exe") and "zcode" in _norm(Path(line).name):
-            found.append(Path(line).parent)
+        # ZCode.exe / ZCode Skin Manager 等都指向安装根目录。
+        # 存 PureWindowsPath 而非 Path：单测把 os.name 伪造成 "nt"（zp.os 即全局 os
+        # 模块单例），此时 Path() 在 macOS/Linux 上会尝试构造 WindowsPath 并抛
+        # NotImplementedError；discover() 消费时统一 Path(root) 转回具体路径
+        # （真实 Windows 运行时才转换，PureWindowsPath 属性与 WindowsPath 一致）。
+        if line.lower().endswith(".exe") and "zcode" in _norm(PureWindowsPath(line).name):
+            found.append(PureWindowsPath(line).parent)
 
 
 def _from_registry(found: list[Path]) -> None:
@@ -545,7 +549,7 @@ def discover() -> list[Path]:
         if VERBOSE:
             print(f"[·] 探测器 {probe.__name__} 命中 {len(roots) - before} 个候选目录")
     seen, result = set(), []
-    for root in roots:
+    for root in map(Path, roots):     # 探针可能存 PureWindowsPath（见 _from_running_processes）
         cjs = root / "resources" / "glm" / "zcode.cjs"
         try:
             key = cjs.resolve()
@@ -1832,16 +1836,22 @@ class _AsarWriteLock:
             raise TimeoutError(
                 f"等待 asar 写入锁超时（{self.timeout:.0f}s）：{self.path.name}\n"
                 f"    本进程内已有注入流程正在写入，请稍后重试")
-        # ② 再拿跨进程文件锁
+        # ② 再拿跨进程文件锁（Windows msvcrt / POSIX fcntl —— 插件在 macOS/Linux 也会注入客户端）
         try:
-            import msvcrt  # Windows 专用；本工具只在 Windows 注入客户端
+            if os.name == "nt":
+                import msvcrt  # Windows 专用
+            else:
+                import fcntl   # POSIX 跨进程文件锁
             deadline = time.time() + self.timeout
             self.path.parent.mkdir(parents=True, exist_ok=True)
             while True:
                 try:
                     fh = open(self.path, "a+b")
                     try:
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        if os.name == "nt":
+                            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except OSError:
                         fh.close()
                         raise
@@ -1875,9 +1885,13 @@ class _AsarWriteLock:
     def __exit__(self, *exc):
         if self._fh is not None:
             try:
-                import msvcrt
                 self._fh.seek(0)
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
             except OSError:
                 pass
             try:
@@ -2789,6 +2803,37 @@ def _resolve_asars(target: str | None) -> list[Path]:
     return asars
 
 
+def _pid_commandline(pid: str) -> "str | None":
+    """POSIX：返回进程完整命令行；进程已消失/查询失败返回 None。"""
+    try:
+        r = subprocess.run(["ps", "-o", "command=", "-p", pid],
+                           capture_output=True, timeout=5, **no_window_kwargs())
+        if r.returncode != 0:
+            return None
+        return r.stdout.decode(errors="replace").strip()
+    except Exception:
+        return None
+
+
+def _pgrep_hits_are_alive(pids: "list[str]", cmdline_of=None) -> bool:
+    """对 pgrep -f ZCode 命中的 PID 逐个核对命令行，排除 crashpad 后判应用是否存活。
+
+    ★ 为什么必须逐个核对（2026-09-24 macOS 实测）：ZCode 每次退出都会泄漏一个
+    chrome_crashpad_handler（ppid=1 的崩溃报告进程，命令行仍含 ZCode.app 路径），
+    pgrep -f ZCode 因此永远非零——退出后看护等不到「退出」，重打包级补丁永远写不
+    进去。本机曾堆积 3.9.1 / 3.10.1 时代的多个泄漏进程，应用本体早已不在。应用真正
+    存活时主进程 / ZCode Helper 必然在列且非 crashpad，不受此排除影响。
+    cmdline_of 返回 None（进程在 pgrep 与 ps 之间消失）按已退出处理。
+    """
+    cmdline_of = cmdline_of or _pid_commandline
+    for pid in pids:
+        cmd = cmdline_of(pid)
+        if cmd is None or "chrome_crashpad_handler" in cmd:
+            continue          # 已消失的 / crashpad 僵尸：不代表应用存活
+        return True
+    return False
+
+
 def zcode_running() -> bool:
     """ZCode 是否在运行（打补丁前预检：运行中会锁住 app.asar，配置也可能被回写覆盖）。"""
     try:
@@ -2798,7 +2843,10 @@ def zcode_running() -> bool:
                                  **no_window_kwargs()).stdout or b""
             return b"ZCode.exe" in out
         r = subprocess.run(["pgrep", "-f", "ZCode"], capture_output=True, timeout=10)  # no-window-ok: 只在 POSIX 分支执行
-        return r.returncode == 0
+        if r.returncode != 0:
+            return False
+        pids = r.stdout.decode(errors="replace").split()
+        return _pgrep_hits_are_alive(pids)
     except Exception:
         return False
 

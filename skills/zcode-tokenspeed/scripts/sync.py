@@ -377,10 +377,14 @@ def run_patcher(args, revert: bool) -> str:
 def start_watchdog(wanted: dict) -> None:
     """启动退出后看护：等 ZCode 退出 → 应用重打包级补丁。"""
     args = [f"--want={k}={'on' if v else 'off'}" for k, v in wanted.items()]
-    flags = (DETACHED_PROCESS | CREATE_NO_WINDOW) if os.name == "nt" else 0
-    subprocess.Popen([sys.executable, str(WATCHDOG), *args], cwd=str(HERE),
-                     creationflags=flags, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL)
+    kw = {"cwd": str(HERE), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = DETACHED_PROCESS | CREATE_NO_WINDOW
+    else:
+        # POSIX：自成会话组（与 spawn_detached 同一做法），否则看护留在钩子的
+        # 进程组里，应用退出/清理时可能被整组信号连带杀掉。
+        kw["start_new_session"] = True
+    subprocess.Popen([sys.executable, str(WATCHDOG), *args], **kw)  # no-window-ok: kw 已按平台携带 DETACHED_PROCESS|CREATE_NO_WINDOW（Windows）/ start_new_session（POSIX）
     log(f"已启动退出后看护: {' '.join(args)}")
 
 

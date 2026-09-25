@@ -13,6 +13,7 @@
 退出码约定（与 zcode_patcher.py 一致）：0=成功、1=有项目失败/等待超时、2=预检失败（ZCode 仍在运行）。
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -36,37 +37,60 @@ TASKLIST_TIMEOUT = 30
 PATCH_TIMEOUT = 600
 
 
+def _import_patcher():
+    """导入主脚本模块；sys.path 只在缺失时插入。
+
+    看护轮询循环每 POLL_SEC 秒调一次 zcode_running() → 本函数被反复执行，
+    不能每次都 insert（sys.path 会无界增长——24h 上限约 2.9 万个重复项）。
+    """
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import zcode_patcher as zp
+    return zp
+
+
 def log(msg: str) -> None:
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 
 def zcode_running() -> bool:
-    # 用 bytes 检索，不走 text 解码：tasklist 输出是 GBK，而本机 Python 为 UTF-8
-    # 模式，text=True 会在读线程里抛 UnicodeDecodeError → stdout 变空 → 误判「已退出」。
-    # 同理不带 /FI：从 Git Bash/MSYS 环境启动时 "/FI" 会被路径转换破坏。
-    # 带 timeout：tasklist 在系统繁忙/WMI 打嗝时可能挂住，看护无人值守，不能无限等。
-    # 超时视为「仍在运行」（保守：宁可多等一轮，也不要在 ZCode 还锁着 asar 时动手）。
+    # 复用主脚本 zcode_patcher.zcode_running() 的跨平台检测（Windows: tasklist 检索
+    # ZCode.exe；POSIX: pgrep -f ZCode）。看护的判定必须与补丁预检同源，否则会出现
+    # 「看护以为退干净了、动手时又被预检拒绝」的永久错位。
+    # 历史问题：这里曾直接跑 ["tasklist"] 并检索 b"ZCode.exe" —— macOS/Linux 上没有
+    # tasklist，FileNotFoundError 未被捕获（except 只接 TimeoutExpired），看护在第一次
+    # 轮询就崩溃；启动方又把 stderr 定向到 DEVNULL，崩溃完全无声，表现为
+    # 「等退出 0 次、完成 0 次」、补丁永远写不进去。
     try:
-        out = subprocess.run(["tasklist"], capture_output=True,
-                             timeout=TASKLIST_TIMEOUT,
-                             **no_window_kwargs()).stdout or b""
-    except subprocess.TimeoutExpired:
-        log(f"tasklist 超时（{TASKLIST_TIMEOUT}s），本轮按「仍在运行」处理")
+        return _import_patcher().zcode_running()
+    except Exception as e:
+        log(f"运行检测失败: {type(e).__name__}: {e}，本轮按「仍在运行」处理")
         return True
-    return b"ZCode.exe" in out
+
+
+def _find_exe(res: Path) -> Path | None:
+    """从 asar 所在目录（<安装根>/resources）推出各平台的 ZCode 主程序路径。"""
+    root = res.parent                       # Windows: 安装根；macOS: ZCode.app/Contents
+    cands: list[Path] = [root / "ZCode.exe"]            # Windows
+    if sys.platform == "darwin":
+        cands.insert(0, root / "MacOS" / "ZCode")       # macOS .app 包
+    else:
+        cands += [root / "zcode", root / "ZCode"]       # Linux 常见命名
+    for c in cands:
+        if c.is_file():
+            return c
+    return None
 
 
 def resolve_install() -> tuple[Path | None, Path | None]:
     """复用主脚本的跨平台探测拿到 (asar 目录, ZCode 可执行文件)。"""
     try:
-        sys.path.insert(0, str(HERE))
-        import zcode_patcher as zp
+        zp = _import_patcher()
         for cjs in zp.discover():
             res = cjs.parent.parent
             if (res / "app.asar").is_file():
-                exe = res.parent / "ZCode.exe"
-                return res, (exe if exe.is_file() else None)
+                return res, _find_exe(res)
     except Exception as e:
         log(f"安装探测失败: {type(e).__name__}: {e}")
     return None, None
@@ -143,15 +167,25 @@ def main() -> int:
 
     res, exe = resolve_install()
     if exe is None:
-        log("未找到 ZCode.exe（可用主脚本探测确认安装位置），请手动启动")
+        log("未找到 ZCode 主程序（Windows: ZCode.exe / macOS: .app 包内 MacOS/ZCode），请手动启动")
         return 1
     log(f"处理完成（失败 {failed} 项），重启 ZCode")
     if zcode_running():
         log("检测到 ZCode 已再次运行，跳过重启")
         return 0
     try:
-        subprocess.Popen([str(exe)], cwd=str(exe.parent),
-                         creationflags=0x00000008)   # DETACHED_PROCESS
+        if os.name == "nt":
+            subprocess.Popen([str(exe)], cwd=str(exe.parent),
+                             creationflags=0x00000008)   # DETACHED_PROCESS——保持上游原样，Windows 行为零变化
+        elif sys.platform == "darwin" and res is not None and res.parent.parent.suffix == ".app":
+            # macOS 经 Launch Services 打开 .app 包。注意 creationflags 是 Windows 专属
+            # 参数，POSIX 上传入会直接抛 ValueError，所以必须按平台分流。
+            subprocess.Popen(["open", str(res.parent.parent)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             **no_window_kwargs())
+        else:
+            subprocess.Popen([str(exe)], cwd=str(exe.parent), start_new_session=True,
+                             **no_window_kwargs())
     except Exception as e:
         log(f"重启 ZCode 失败（请手动启动）: {e}")
         return 1
@@ -160,4 +194,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # 看护无人值守：崩溃必须留痕。此前 stderr 被 start_watchdog 定向到 DEVNULL，
+        # 崩溃无声 —— 这正是 macOS 上「等退出 0 次」长期没被发现的原因。
+        import traceback
+        log("看护异常退出:\n" + traceback.format_exc())
+        sys.exit(1)
